@@ -5,14 +5,9 @@ extern crate strip_ansi;
 extern crate serde;
 extern crate tokio;
 
-use eframe::{egui, NativeOptions, App, Error, Frame};
+use eframe::{egui, App};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{self, Write, Read};
-use std::fs::OpenOptions;
-use directories::BaseDirs;
-use strip_ansi::strip_ansi;
 use tokio::runtime::Runtime;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -224,7 +219,6 @@ impl App for D1GuiWrapper {
 
             ui.separator();
 
-            let context = app.database_context.clone();
             let mut local_context = false;
             let mut remote_context = false;
             let mut preview_context = false;
