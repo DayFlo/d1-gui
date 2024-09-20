@@ -14,7 +14,6 @@ pub enum AuthenticationMode {
     Wrangler,
 }
 
-#[derive(Clone)]
 pub struct D1Gui {
     query: String,
     results: String,
@@ -29,7 +28,7 @@ pub struct D1Gui {
     is_executing: bool,
     authentication_mode: AuthenticationMode,
     wrangler_file: Option<PathBuf>,
-    open_file_dialog: Option<Arc<Mutex<FileDialog>>>,
+    file_dialog: Option<FileDialog>,
 }
 
 impl Default for D1Gui {
@@ -48,7 +47,7 @@ impl Default for D1Gui {
             is_executing: false,
             authentication_mode: AuthenticationMode::Credentials,
             wrangler_file: None,
-            open_file_dialog: None,
+            file_dialog: None,
         }
     }
 }
@@ -61,6 +60,8 @@ impl eframe::App for D1Gui {
 
 impl D1Gui {
     pub fn update_ui(&mut self, ctx: &egui::Context) {
+        let this = Arc::new(Mutex::new(self.clone())); // Wrap self in Arc<Mutex>
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Cloudflare D1 GUI");
 
@@ -124,24 +125,23 @@ impl D1Gui {
                             }
 
                             if ui.button("Pick Wrangler.toml").clicked() {
-                                self.open_file_dialog =
-                                    Some(Arc::new(Mutex::new(FileDialog::open_file(None))));
+                                let mut dialog = FileDialog::open_file(None)
+                                    .resizable(false)
+                                    .title("Select wrangler.toml");
+                                dialog.open();
+                                self.file_dialog = Some(dialog);
                             }
                         });
 
                         // Show file picker if the dialog is set
-                        if let Some(dialog_arc) = &self.open_file_dialog {
-                            let mut dialog = dialog_arc.lock().unwrap(); // Lock the FileDialog
-                            if dialog.show(ctx).selected() {
+                        if let Some(dialog) = &mut self.file_dialog {
+                            dialog.show(ctx);
+
+                            if dialog.selected() {
                                 if let Some(file) = dialog.path() {
-                                    self.wrangler_file = Some(file.to_path_buf());
-                                    // Use PathBuf directly
+                                    self.wrangler_file = Some(file.to_path_buf().clone());
                                 }
-                                // Unlock the dialog before setting it to None
-                                drop(dialog); // Drop the lock before mutating open_file_dialog
-                                self.open_file_dialog = None; // Close the dialog after selection
-                            } else {
-                                dialog.open(); // Keep the file picker open
+                                self.file_dialog = None; // Close the dialog after selection
                             }
                         }
                     }
@@ -149,14 +149,34 @@ impl D1Gui {
 
                 if ui.button("Authenticate").clicked() {
                     let ctx = ctx.clone();
-                    let mut this = self.clone(); // Now we can clone self
+                    let this = Arc::clone(&this);
+
                     Handle::current().spawn(async move {
-                        if let Err(err) = this.authenticate().await {
-                            this.status_message = format!("Authentication failed: {}", err);
+                        let (mut status_message, mut is_authenticated, mut cloned_this); // Declare cloned_this as mutable
+
+                        // Acquire the lock, clone/copy necessary values, and drop the lock
+                        {
+                            let this = this.lock().unwrap(); // Lock the mutex
+
+                            // Clone/copy the values you need
+                            cloned_this = this.clone(); // Clone the `D1Gui` instance
+                            status_message = this.status_message.clone();
+                            is_authenticated = this.is_authenticated;
+                        } // Lock is dropped here
+
+                        // Now perform the async operation without holding the lock
+                        if let Err(err) = cloned_this.authenticate().await {
+                            status_message = format!("Authentication failed: {}", err);
                         } else {
-                            this.is_authenticated = true;
-                            this.status_message = "Authentication successful.".to_string();
+                            is_authenticated = true;
+                            status_message = "Authentication successful.".to_string();
                         }
+
+                        // Re-acquire the lock to update the shared state
+                        let mut this = this.lock().unwrap();
+                        this.status_message = status_message;
+                        this.is_authenticated = is_authenticated;
+
                         ctx.request_repaint();
                     });
                 }
@@ -182,7 +202,6 @@ impl D1Gui {
                     self.results.clear();
                     self.history.clear();
                     self.wrangler_file = None;
-                    self.open_file_dialog = None;
                 }
             });
 
@@ -200,7 +219,25 @@ impl D1Gui {
             if !self.is_executing && ui.button("Execute Query").clicked() {
                 self.is_executing = true; // Prevent multiple queries
                 let ctx = ctx.clone();
-                let mut this = self.clone();
+
+                // Clone only the cloneable parts of `self`
+                let mut this = D1Gui {
+                    query: self.query.clone(),
+                    results: self.results.clone(),
+                    history: self.history.clone(),
+                    database_uuid: self.database_uuid.clone(),
+                    database_name: self.database_name.clone(),
+                    database_context: self.database_context.clone(),
+                    account_id: self.account_id.clone(),
+                    api_token: self.api_token.clone(),
+                    is_authenticated: self.is_authenticated,
+                    status_message: self.status_message.clone(),
+                    is_executing: self.is_executing,
+                    authentication_mode: self.authentication_mode.clone(),
+                    wrangler_file: self.wrangler_file.clone(),
+                    file_dialog: None, // Set this to None or handle it differently
+                };
+
                 Handle::current().spawn(async move {
                     if let Err(err) = this.authenticate().await {
                         this.status_message = format!("Authentication failed: {}", err);
@@ -446,5 +483,26 @@ impl D1Gui {
     pub fn reset_after_query(&mut self) {
         self.is_executing = false;
         self.status_message.clear();
+    }
+}
+
+impl Clone for D1Gui {
+    fn clone(&self) -> Self {
+        Self {
+            query: self.query.clone(),
+            results: self.results.clone(),
+            history: self.history.clone(),
+            database_uuid: self.database_uuid.clone(),
+            database_name: self.database_name.clone(),
+            database_context: self.database_context.clone(),
+            account_id: self.account_id.clone(),
+            api_token: self.api_token.clone(),
+            is_authenticated: self.is_authenticated,
+            status_message: self.status_message.clone(),
+            is_executing: self.is_executing,
+            authentication_mode: self.authentication_mode.clone(),
+            wrangler_file: self.wrangler_file.clone(),
+            file_dialog: None,
+        }
     }
 }
