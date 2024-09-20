@@ -124,7 +124,6 @@ impl D1Gui {
                             }
 
                             if ui.button("Pick Wrangler.toml").clicked() {
-                                // Set a flag to open the file dialog
                                 self.open_file_dialog =
                                     Some(Arc::new(Mutex::new(FileDialog::open_file(None))));
                             }
@@ -138,10 +137,11 @@ impl D1Gui {
                                     self.wrangler_file = Some(file.to_path_buf());
                                     // Use PathBuf directly
                                 }
-
                                 // Unlock the dialog before setting it to None
                                 drop(dialog); // Drop the lock before mutating open_file_dialog
-                                self.open_file_dialog = None;
+                                self.open_file_dialog = None; // Close the dialog after selection
+                            } else {
+                                dialog.open(); // Keep the file picker open
                             }
                         }
                     }
