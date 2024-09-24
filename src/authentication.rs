@@ -309,11 +309,16 @@ impl D1Gui {
 
                 let output = Command::new("wrangler").args(&args).output();
                 if !self.wrangler_toml_path.is_empty() {
-                    let _ = Command::new("wrangler").args(&[
+                    let config_args = vec![
                         "d1",
-                        "-c",
-                        &self.wrangler_toml_path.trim(),
-                    ]).output();
+                        "--config",
+
+                    ];
+                    let _ = Command::new("wrangler")
+                        .arg("d1")
+                        .arg("--config")
+                        .arg(format!("{}", &self.wrangler_toml_path.trim()))
+                        .output();
                 } else {
                     return Err(format!("No configuration wrangler .toml file selected"))
                 }
@@ -357,19 +362,40 @@ impl D1Gui {
             self.database_name.trim(),
             "--database",
             self.database_uuid.trim(),
-            "--command",
-            self.query.trim(),
             "--json",
         ];
 
+
         let output = Command::new("wrangler")
             .args(&args)
+            .arg("--command")
+            .arg(format!("{}", &self.query.trim()))
             .output()
             .map_err(|e| e.to_string())?;
 
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(stderr.to_string());
+
+            if !stderr.is_empty() {
+                return Err(stderr.to_string());
+            } else {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+
+                // Try to parse the stdout as JSON and extract the error message
+                match serde_json::from_str::<Value>(&stdout) {
+                    Ok(json) => {
+                        if let Some(error_text) = json.get("error").and_then(|err| err.get("text")) {
+                            return Err(error_text.as_str().unwrap_or("Unknown error").to_string());
+                        } else {
+                            return Err("Unknown error format in stdout".to_string());
+                        }
+                    }
+                    Err(_) => {
+                        return Err(format!("Failed to parse stdout as JSON: {}", stdout));
+                    }
+                }
+            }
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -379,6 +405,7 @@ impl D1Gui {
 
         // Extract the results
         if let Some(result) = value.get("result") {
+            println!("Query result: {}", result);
             self.results =
                 serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
         } else {
