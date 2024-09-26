@@ -247,7 +247,6 @@ impl D1Gui {
     fn execute_query(&mut self, ui: &mut egui::Ui, rt: &Runtime) {
         self.is_executing = true;
         let ctx = ui.ctx().clone();
-
         rt.block_on(async move {
             match self.execute_query_internal().await {
                 Ok(_) => {
@@ -258,8 +257,10 @@ impl D1Gui {
                 }
             }
             self.is_executing = false;
-            ctx.request_repaint();
+            
         });
+
+        ctx.request_repaint();
     }
 
     async fn authenticate(&self) -> Result<(), String> {
@@ -269,9 +270,8 @@ impl D1Gui {
 
                 // Create the Cloudflare D1 API URL
                 let url = format!(
-                    "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}",
+                    "https://api.cloudflare.com/client/v4/accounts/{}/tokens/verify",
                     self.account_id.trim(),
-                    self.database_uuid.trim()
                 );
 
                 let response = client
@@ -348,79 +348,131 @@ impl D1Gui {
     }
 
     async fn execute_query_internal(&mut self) -> Result<(), String> {
-        if self.database_name.trim().is_empty() {
-            return Err("Database name is required.".to_string());
-        }
+        match self.authentication_mode {
+            AuthenticationMode::Credentials => {
+                println!("Using Credentials");
+                let client = reqwest::Client::new();
 
-        if self.database_uuid.trim().is_empty() {
-            return Err("Database UUID is required.".to_string());
-        }
+                // Create the Cloudflare D1 API URL
+                let url = format!(
+                    "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}",
+                    self.account_id.trim(),
+                    self.database_uuid.trim()
+                );
 
-        let mut args = vec![
-            "d1",
-            "execute",
-            self.database_name.trim(),
-            "--database",
-            self.database_uuid.trim(),
-            "--json",
-        ];
+                let response = client
+                    .get(&url)
+                    .bearer_auth(self.api_token.trim())
+                    .send()
+                    .await
+                    .map_err(|e| format!("Request failed: {}", e))?;
 
+                let status = response.status();
+                let text = response.text().await.map_err(|e| e.to_string())?;
 
-        let output = Command::new("wrangler")
-            .args(&args)
-            .arg("--command")
-            .arg(format!("{}", &self.query.trim()))
-            .output()
-            .map_err(|e| e.to_string())?;
+                println!("Query result: {}", text);
+                if !status.is_success() {
+                    return Err(format!("Error: HTTP {}: {}", status, text));
+                }
 
+                // Parse the JSON response
+                let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+                // Check if the "success" field is true
+                if let Some(result) = value.get("result") {
+                    println!("Query result: {}", result);
+                    self.results =
+                        serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
+                } else {
+                    self.results =
+                        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+                }
 
-            if !stderr.is_empty() {
-                return Err(stderr.to_string());
-            } else {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-
-                // Try to parse the stdout as JSON and extract the error message
-                match serde_json::from_str::<Value>(&stdout) {
-                    Ok(json) => {
-                        if let Some(error_text) = json.get("error").and_then(|err| err.get("text")) {
-                            return Err(error_text.as_str().unwrap_or("Unknown error").to_string());
-                        } else {
-                            return Err("Unknown error format in stdout".to_string());
-                        }
-                    }
-                    Err(_) => {
-                        return Err(format!("Failed to parse stdout as JSON: {}", stdout));
+                let trimmed_query = self.query.trim().to_string();
+                if !trimmed_query.is_empty() {
+                    if self.history.first() != Some(&trimmed_query) {
+                        self.history.insert(0, trimmed_query);
                     }
                 }
+
+                Ok(())
+            },
+            AuthenticationMode::Wrangler => {
+                if self.database_name.trim().is_empty() {
+                    return Err("Database name is required.".to_string());
+                }
+
+                if self.database_uuid.trim().is_empty() {
+                    return Err("Database UUID is required.".to_string());
+                }
+
+                let mut args = vec![
+                    "d1",
+                    "execute",
+                    self.database_name.trim(),
+                    "--database",
+                    self.database_uuid.trim(),
+                    "--json",
+                ];
+
+
+                let output = Command::new("wrangler")
+                    .args(&args)
+                    .arg("--command")
+                    .arg(format!("{}", &self.query.trim()))
+                    .output()
+                    .map_err(|e| e.to_string())?;
+
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+
+                    if !stderr.is_empty() {
+                        return Err(stderr.to_string());
+                    } else {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+
+                        // Try to parse the stdout as JSON and extract the error message
+                        match serde_json::from_str::<Value>(&stdout) {
+                            Ok(json) => {
+                                if let Some(error_text) = json.get("error").and_then(|err| err.get("text")) {
+                                    return Err(error_text.as_str().unwrap_or("Unknown error").to_string());
+                                } else {
+                                    return Err("Unknown error format in stdout".to_string());
+                                }
+                            }
+                            Err(_) => {
+                                return Err(format!("Failed to parse stdout as JSON: {}", stdout));
+                            }
+                        }
+                    }
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+                // Parse the JSON output
+                let value: Value = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+
+                // Extract the results
+                if let Some(result) = value.get("result") {
+                    println!("Query result: {}", result);
+                    self.results =
+                        serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
+                } else {
+                    self.results =
+                        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+                }
+
+                // Save the query to history
+                let trimmed_query = self.query.trim().to_string();
+                if !trimmed_query.is_empty() {
+                    if self.history.first() != Some(&trimmed_query) {
+                        self.history.insert(0, trimmed_query);
+                    }
+                }
+
+                Ok(())
             }
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-
-        // Parse the JSON output
-        let value: Value = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
-
-        // Extract the results
-        if let Some(result) = value.get("result") {
-            println!("Query result: {}", result);
-            self.results =
-                serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
-        } else {
-            self.results =
-                serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-        }
-
-        // Save the query to history
-        let trimmed_query = self.query.trim().to_string();
-        if !trimmed_query.is_empty() {
-            if self.history.first() != Some(&trimmed_query) {
-                self.history.insert(0, trimmed_query);
-            }
-        }
-
-        Ok(())
     }
 }
