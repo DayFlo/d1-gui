@@ -6,7 +6,7 @@ extern crate serde;
 extern crate tokio;
 
 use eframe::{ egui, App };
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use std::process::Command;
 use std::sync::{ mpsc::{ channel, Receiver, Sender } };
@@ -350,19 +350,26 @@ impl D1Gui {
     async fn execute_query_internal(&mut self) -> Result<(), String> {
         match self.authentication_mode {
             AuthenticationMode::Credentials => {
-                println!("Using Credentials");
                 let client = reqwest::Client::new();
 
                 // Create the Cloudflare D1 API URL
                 let url = format!(
-                    "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}",
+                    "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}/query",
                     self.account_id.trim(),
                     self.database_uuid.trim()
                 );
 
+                // Construct the JSON body
+                let json_body = json!({
+                    "params": [], // Empty params as per your query
+                    "sql": self.query.trim() // The raw SQL query
+                });
+
+                // Send the request with the JSON body
                 let response = client
-                    .get(&url)
-                    .bearer_auth(self.api_token.trim())
+                    .post(&url)
+                    .json(&json_body) // Send the constructed JSON body
+                    .bearer_auth(self.api_token.trim()) // Add Bearer token for authentication
                     .send()
                     .await
                     .map_err(|e| format!("Request failed: {}", e))?;
@@ -370,7 +377,6 @@ impl D1Gui {
                 let status = response.status();
                 let text = response.text().await.map_err(|e| e.to_string())?;
 
-                println!("Query result: {}", text);
                 if !status.is_success() {
                     return Err(format!("Error: HTTP {}: {}", status, text));
                 }
@@ -379,7 +385,7 @@ impl D1Gui {
                 let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
                 // Check if the "success" field is true
-                if let Some(result) = value.get("result") {
+                if let Some(result) = value.get("results") {
                     println!("Query result: {}", result);
                     self.results =
                         serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
